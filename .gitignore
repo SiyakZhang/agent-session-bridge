@@ -1,0 +1,56 @@
+# Python environments, caches, and build output
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local configuration and runtime data
+.env
+.env.*
+!.env.example
+config.json
+config.local.json
+*.local.json
+state/
+.dingtalk-session-bridge/
+.agent-session-bridge/
+.codex/
+.claude/
+backups/
+reports/
+screenshots/
+*.jsonl
+!tests/fixtures/**/*.jsonl
+*.log
+*.log.*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.zip
+
+# Local keys and access files
+known_hosts*
+id_ed25519
+id_rsa
+*.pem
+*.key
+*.ppk
+*.p12
+*.pfx
+*.token
+
+# Desktop files
+.DS_Store
+Thumbs.db
