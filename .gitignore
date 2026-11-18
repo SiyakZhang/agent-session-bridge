@@ -19,6 +19,7 @@ htmlcov/
 !.env.example
 config.json
 config.local.json
+config.pre-*.json
 *.local.json
 state/
 .dingtalk-session-bridge/
@@ -28,6 +29,8 @@ state/
 backups/
 reports/
 screenshots/
+node-id
+*.bridge-backup-*
 *.jsonl
 !tests/fixtures/**/*.jsonl
 *.log

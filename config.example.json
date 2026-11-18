@@ -1,0 +1,17 @@
+{
+  "client_id": "YOUR_DINGTALK_APP_KEY",
+  "client_secret": "YOUR_DINGTALK_APP_SECRET",
+  "robot_code": "YOUR_DINGTALK_ROBOT_CODE",
+  "nodes": [
+    {
+      "id": "windows",
+      "instance": "REPLACE_WITH_LOCAL_NODE_UUID",
+      "state": "C:/path/to/private-bridge-state"
+    }
+  ],
+  "viewer": {
+    "enabled": false,
+    "host": "127.0.0.1",
+    "port": 8766
+  }
+}
