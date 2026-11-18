@@ -8,7 +8,7 @@ Windows 网关收发钉钉消息，节点以原桌面用户身份读写各自的
 
 配置默认位于 `~/.dingtalk-session-bridge/config.json`。可通过 `SESSION_BRIDGE_HOME` 指定其他状态目录。使用同一状态目录运行 `doctor`、`run`、`pair` 和 `status`。
 
-- `doctor` 检查钉钉凭证和已配置节点。
+- `doctor` 检查钉钉凭证并列出已配置的节点。
 - `status` 查看网关心跳、Stream 连接和节点状态。
 - `pair` 生成一次性配对命令。配对绑定发命令时的账号和聊天。
 
