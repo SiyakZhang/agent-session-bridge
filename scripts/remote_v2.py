@@ -90,6 +90,7 @@ def main():
                 "tests/test_revision.py",
                 "tests/test_revision_safety.py",
                 "tests/test_interactive.py",
+                "tests/test_mobile_regression.py",
             ]
         else:
             with client.open_sftp() as sftp:

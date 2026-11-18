@@ -282,7 +282,7 @@ def run(node_id, state):
                             )
                         ):
                             action_result = control.action(
-                                session, message["action"], message.get("text", "")
+                                session, message["action"], message.get("text", ""), request_id=rid
                             )
                         elif session["engine"] == "claude" and message.get("action") == "answer":
                             action_result = hook_answer(

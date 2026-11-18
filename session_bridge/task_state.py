@@ -123,7 +123,7 @@ class TaskState:
                         "INSERT OR IGNORE INTO sent_links VALUES(?,?,?)",
                         (row[0], "process:" + str(receipt["processQueryKey"]), oid),
                     )
-                for key in ("msgId", "messageId", "openMessageId"):
+                for key in ("msgId", "messageId", "openMessageId", "openMsgId"):
                     if receipt.get(key):
                         self.db.execute(
                             "INSERT OR IGNORE INTO sent_links VALUES(?,?,?)",
@@ -178,6 +178,14 @@ class TaskState:
             task = self.task(alias)
             if not task or task["generation"] != generation:
                 raise ValueError("引用属于清理前的旧对话，请查看历史或明确指定当前任务。")
+            if reply.get("id") and len(rows) == 1:
+                # A signed, paired callback supplies the genuine quoted bot message ID.
+                # Reject contradictions above before remembering it.
+                with self.transaction():
+                    self.db.execute(
+                        "INSERT OR IGNORE INTO sent_links VALUES(?,?,?)",
+                        (chat, reply["id"], rows[0]["id"]),
+                    )
             session = self.session(alias)
             if question:
                 session["_selection"] = question

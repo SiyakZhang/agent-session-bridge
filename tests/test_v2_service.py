@@ -124,6 +124,8 @@ def test_model_choice_exact_request(system):
         "choices": [{"label": "模型", "value": "model-a"}],
     }
     svc.handle("model", incoming("松！模型"))
+    oid = db.db.execute("SELECT id FROM outbox ORDER BY id DESC LIMIT 1").fetchone()[0]
+    db.sent(oid, "sent")
     svc.nodes["win"].result = {"status": "ok", "detail": "changed"}
     svc.handle("choose", incoming("松1"))
     assert svc.nodes["win"].actions[-1][-2:] == ("model", "model-a")
@@ -159,7 +161,7 @@ def test_full_output_utf8_json_budget(system):
     assert (
         db.db.execute("SELECT body FROM outbox ORDER BY id DESC LIMIT 1")
         .fetchone()[0]
-        .split("\n\n---\n")[0]
+        .rsplit("\n\n🤖 ", 1)[0]
         .endswith("保留最后一行")
     )
 

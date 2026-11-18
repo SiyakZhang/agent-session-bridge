@@ -62,6 +62,7 @@ class Rpc:
         self.telemetry = {}
         self.events = []
         self.compactions = {}
+        self.control_requests = {}
         self.auth_generation = 0
         self.alive = True
         threading.Thread(target=self.read, daemon=True).start()
@@ -69,7 +70,7 @@ class Rpc:
             self.call(
                 "initialize",
                 {
-                    "clientInfo": {"name": "dingtalk_session_bridge", "version": "0.3.0"},
+                    "clientInfo": {"name": "dingtalk_session_bridge", "version": "0.3.7"},
                     "capabilities": {"experimentalApi": True},
                 },
             )
@@ -192,14 +193,27 @@ class Rpc:
                 self.questions[str(frame["id"])] = frame
 
     def native_event(self, params, kind, result, token):
+        sid = params.get("threadId")
+        turn = params.get("turnId") or (params.get("turn") or {}).get("id")
+        requests = getattr(self, "control_requests", {})
+        related = {}
+        if kind in ("aborted", "failed"):
+            related["stop"] = requests.pop((sid, "stop", turn), None)
+        if kind in ("compacting", "compacted", "aborted", "failed"):
+            key = (sid, "compact", None)
+            related["compact"] = (
+                requests.get(key) if kind == "compacting" else requests.pop(key, None)
+            )
         self.events.append(
             {
-                "sid": params.get("threadId"),
+                "sid": sid,
                 "engine": "codex",
                 "kind": kind,
                 "result": result,
-                "turn": params.get("turnId"),
+                "turn": turn,
                 "token": token,
+                "control_requests": related,
+                "await_abort_reason": kind == "aborted",
                 "event_id": self.epoch + ":" + secrets.token_hex(12),
                 "ts": time.time(),
             }
@@ -641,7 +655,7 @@ class CodexControl:
                 )
         return rows
 
-    def action(self, session, command, argument):
+    def action(self, session, command, argument, request_id=None):
         sid = session["sid"]
         if not self.owns(sid):
             raise ValueError("不属于此共享服务的原会话，拒绝控制。")
@@ -701,7 +715,20 @@ class CodexControl:
             if not current["active_turn"]:
                 return {"status": "failed", "detail": "当前没有执行中的回合。"}
             if command == "stop":
-                rpc.call("turn/interrupt", {"threadId": sid, "turnId": current["active_turn"]})
+                turn = current["active_turn"]
+                key = (sid, "stop", turn)
+                with rpc.lock:
+                    if request_id:
+                        rpc.control_requests.setdefault(key, request_id)
+                try:
+                    rpc.call("turn/interrupt", {"threadId": sid, "turnId": turn})
+                except DeliveryUnknown:
+                    raise
+                except (OSError, RuntimeError, ValueError):
+                    with rpc.lock:
+                        if rpc.control_requests.get(key) == request_id:
+                            rpc.control_requests.pop(key, None)
+                    raise
                 return {"status": "accepted", "detail": "已请求中断，正在等待原生状态更新。"}
             if not argument.strip():
                 raise ValueError("请输入补充内容。")
@@ -720,14 +747,21 @@ class CodexControl:
             if current["status"] in ("busy", "compacting"):
                 raise ValueError("请先停止当前执行，再压缩上下文。")
             rpc.compactions[sid] = time.time()
+            key = (sid, "compact", None)
+            with rpc.lock:
+                if request_id:
+                    rpc.control_requests[key] = request_id
             try:
                 rpc.call("thread/compact/start", {"threadId": sid})
             except DeliveryUnknown:
                 raise
             except (OSError, RuntimeError, ValueError):
                 rpc.compactions.pop(sid, None)
+                with rpc.lock:
+                    if rpc.control_requests.get(key) == request_id:
+                        rpc.control_requests.pop(key, None)
                 raise
-            return {"status": "accepted", "detail": "压缩请求已接受，完成或失败后会另行提示。"}
+            return {"status": "accepted", "detail": "压缩请求已接受。"}
         if command == "model" and not argument.strip():
             models = rpc.call("model/list", {})["data"]
             return {

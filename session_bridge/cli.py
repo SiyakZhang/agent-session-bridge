@@ -34,7 +34,6 @@ def gateway():
     import dingtalk_stream
 
     from .bot import (
-        CardHandler,
         DingAPI,
         Handler,
         SafeStreamClient,
@@ -116,9 +115,6 @@ def gateway():
 
     threading.Thread(target=heartbeat, daemon=True).start()
     client.register_callback_handler(dingtalk_stream.ChatbotMessage.TOPIC, Handler(service))
-    client.register_callback_handler(
-        dingtalk_stream.CallbackHandler.TOPIC_CARD_CALLBACK, CardHandler(service)
-    )
     logging.getLogger(__name__).info(
         "Gateway started, pid=%s, nodes=%s", os.getpid(), ",".join(service.nodes)
     )

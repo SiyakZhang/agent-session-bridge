@@ -5,6 +5,7 @@ import pytest
 
 from session_bridge.codex_control import CodexControl, Rpc, terminal_failed
 from session_bridge.delivery import DeliveryUnknown
+from session_bridge.questions import parse_answer
 
 
 class FakeRpc:
@@ -118,6 +119,30 @@ def test_locally_resolved_approval_cannot_be_answered(control):
         control.action(
             {"sid": "sid"}, "answer", json.dumps({"key": "epoch:1", "decision": "accept"})
         )
+
+
+def test_native_question_submits_numeric_option_label_without_decoding_twice(control):
+    question = {
+        "id": "size",
+        "question": "选择尺寸",
+        "isOther": False,
+        "options": [{"label": label} for label in ("128", "256", "512")],
+    }
+    control.rpc.questions["1"] = {
+        "id": 1,
+        "method": "item/tool/requestUserInput",
+        "params": {"threadId": "sid", "questions": [question]},
+    }
+    with pytest.raises(ValueError, match="只接受列出的选项"):
+        control.action(
+            {"sid": "sid"},
+            "answer",
+            json.dumps({"key": "epoch:1", "answers": {"size": {"answers": ["2"]}}}),
+        )
+    decoded = parse_answer(question, "2")
+    answers = {"size": {"answers": decoded}}
+    control.action({"sid": "sid"}, "answer", json.dumps({"key": "epoch:1", "answers": answers}))
+    assert control.rpc.writes == [{"id": 1, "result": {"answers": {"size": {"answers": ["256"]}}}}]
 
 
 def test_no_existing_session_takeover(control):

@@ -65,6 +65,10 @@ def parse_record(engine, record, meta):
             if text and not text.lstrip().startswith("<environment_context>"):
                 meta["prompt"] = redact(text)
         elif kind == "turn_context":
+            provider = data.get("model_provider")
+            if provider is not None and provider != meta.get("model_provider"):
+                meta.pop("native_rate_limits", None)
+                meta.pop("rate_limits_at", None)
             for key in ("model", "model_provider", "effort"):
                 if data.get(key) is not None:
                     meta[key] = data[key]
@@ -123,6 +127,7 @@ def parse_record(engine, record, meta):
                 meta["prompt"] = redact(data.get("message", ""))
             elif subtype == "task_started":
                 meta.pop("compaction_completed", None)
+                meta.pop("user_initiated", None)
                 meta["turn"] = data.get("turn_id", record.get("timestamp", ""))
                 meta["status"] = "busy"
                 meta["result"] = ""
@@ -158,7 +163,10 @@ def parse_record(engine, record, meta):
             elif subtype in ("task_complete", "turn_aborted"):
                 meta["turn"] = data.get("turn_id") or meta.get("turn", record.get("timestamp", ""))
                 error = data.get("error")
-                if error or (meta.get("failure") and not data.get("last_agent_message")):
+                user_stopped = subtype == "turn_aborted" and data.get("reason") == "interrupted"
+                if error or (
+                    meta.get("failure") and not data.get("last_agent_message") and not user_stopped
+                ):
                     meta["failure"] = error or meta["failure"]
                     meta["status"] = "failed"
                     meta["result"] = failure_message(meta["failure"])
@@ -171,6 +179,8 @@ def parse_record(engine, record, meta):
                     meta["status"] = "idle"
                     return None
                 meta["status"] = "idle" if subtype == "task_complete" else "aborted"
+                if subtype == "turn_aborted":
+                    meta["user_initiated"] = user_stopped
                 meta["turn"] = data.get("turn_id") or meta.get("turn", record.get("timestamp", ""))
                 meta["result"] = redact(
                     str(

@@ -3,6 +3,12 @@
 import math
 import re
 
+NUMBERED_ANSWER = re.compile(r"\d+(?:(?:\s+|\s*[,，、]\s*)\d+)*")
+
+
+def is_numbered_answer(text):
+    return NUMBERED_ANSWER.fullmatch(text.strip()) is not None
+
 
 def normalize_questions(questions):
     result = []
@@ -24,21 +30,41 @@ def normalize_questions(questions):
 def question_text(choice):
     questions = choice.get("questions") or []
     if not questions:
-        return "\n".join(f"{i + 1}. {o['label']}" for i, o in enumerate(choice.get("options", [])))
+        options = choice.get("options") or []
+        lines = [
+            f"{i + 1}. {o['label']}" + (" — " + o["description"] if o.get("description") else "")
+            for i, o in enumerate(options)
+        ]
+        if choice.get("remote") is False:
+            lines.append("请在原电脑处理。")
+        elif options:
+            lines.append("引用这条消息，回复选项数字。")
+        return "\n\n".join(lines)
     index = choice.get("question_index", 0)
     q = questions[index]
-    lines = [f"问题 {index + 1}/{len(questions)}：{q['question']}"]
+    lines = [(f"问题 {index + 1}/{len(questions)}：" if len(questions) > 1 else "") + q["question"]]
+    if q.get("header") and q["header"] != q["question"]:
+        lines.insert(0, q["header"])
     for i, option in enumerate(q.get("options") or []):
         lines.append(
             f"{i + 1}. {option['label']}"
             + (" — " + option["description"] if option.get("description") else "")
         )
-    lines.append(
-        "可回复多个数字，例如 1,3。" if q.get("multiSelect") else "回复选项数字，或直接输入答案。"
-    )
     if q.get("isSecret"):
         lines.append("此题涉及敏感输入，请回原电脑填写。")
-    return "\n".join(lines)
+    elif choice.get("remote") is False and choice.get("async") is not True:
+        lines.append("请在原电脑回答。")
+    elif not q.get("options"):
+        lines.append("引用这条消息，直接输入答案。")
+    else:
+        lines.append(
+            "引用这条消息，可回复多个选项数字，例如 1,3。"
+            if q.get("multiSelect")
+            else "引用这条消息，回复选项数字。"
+            if q.get("isOther") is False
+            else "引用这条消息，回复选项数字或直接输入答案。"
+        )
+    return "\n\n".join(lines)
 
 
 def parse_answer(question, text):
@@ -48,8 +74,8 @@ def parse_answer(question, text):
     if not value:
         raise ValueError("请输入答案。")
     options = question.get("options") or []
-    if options and re.fullmatch(r"\d+(?:\s*[,，、 ]\s*\d+)*", value):
-        indexes = list(dict.fromkeys(int(x) - 1 for x in re.split(r"[,，、 ]+", value)))
+    if options and is_numbered_answer(value):
+        indexes = list(dict.fromkeys(int(x) - 1 for x in re.split(r"[,，、\s]+", value)))
         if any(x < 0 or x >= len(options) for x in indexes):
             raise ValueError("选项编号超出范围。")
         if len(indexes) > 1 and not question.get("multiSelect"):
@@ -74,8 +100,12 @@ def validate_answers(questions, answers):
             raise ValueError("原生答案格式无效。")
         if len(values) > 1 and not q.get("multiSelect"):
             raise ValueError("单选问题不能提交多个答案。")
-        for value in values:
-            parse_answer(q, value)
+        if q.get("isSecret"):
+            raise ValueError("敏感输入请回原电脑填写，未通过聊天提交。")
+        # These values have already been resolved from chat positions to native labels.
+        options = {option["label"] for option in (q.get("options") or [])}
+        if options and q.get("isOther") is False and any(value not in options for value in values):
+            raise ValueError("此题只接受列出的选项，请回复对应数字。")
 
 
 def elicitation_questions(params):

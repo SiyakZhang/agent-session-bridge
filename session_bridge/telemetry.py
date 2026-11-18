@@ -3,6 +3,7 @@
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import threading
@@ -22,19 +23,29 @@ def provider_source(session):
     return "unknown"
 
 
+def weekly_codex_window(limits):
+    for name in ("primary", "secondary"):
+        window = limits.get(name)
+        if not isinstance(window, dict):
+            continue
+        minutes = window.get("windowDurationMins", window.get("windowMinutes"))
+        used = window.get("usedPercent")
+        reset = window.get("resetsAt")
+        if reset and (type(reset) not in (int, float) or reset <= time.time()):
+            continue
+        if minutes == 7 * 24 * 60 and type(used) in (int, float) and 0 <= used <= 100:
+            return {**window, "windowDurationMins": minutes}
+    return None
+
+
 def session_quota(session):
-    """Only an observation made inside this session is eligible for its footer."""
+    """Use native observations from this session without inferring a billing balance."""
     limits = session.get("native_rate_limits")
     binding = session.get("quota_binding") or {}
-    if (
-        not isinstance(limits, dict)
-        or provider_source(session) != "codex"
-        or binding.get("auth_mode") != "chatgpt"
-        or not binding.get("account_fingerprint")
-        or binding.get("provider") != session.get("model_provider")
-        or session.get("rate_limits_at", 0) < binding.get("verified_at", float("inf"))
-    ):
-        return {"source": "unknown", "status": "unsupported", "checked_at": time.time()}
+    reported_at = session.get("rate_limits_at", 0)
+    unsupported = {"source": "unknown", "status": "unsupported", "checked_at": time.time()}
+    if not isinstance(limits, dict) or not reported_at:
+        return unsupported
 
     def camel(value):
         if isinstance(value, dict):
@@ -44,37 +55,64 @@ def session_quota(session):
             }
         return value
 
-    if limits.get("limit_id", limits.get("limitId")) not in ("codex", None):
-        return {"source": "unknown", "status": "unsupported", "checked_at": time.time()}
+    limits = camel(limits)
+    if limits.get("limitId") not in ("codex", None):
+        return unsupported
+    provider = provider_source(session)
+    bound = (
+        provider == "codex"
+        and binding.get("auth_mode") == "chatgpt"
+        and binding.get("account_fingerprint")
+        and binding.get("provider") == session.get("model_provider")
+        and reported_at >= binding.get("verified_at", float("inf"))
+    )
+    if not bound:
+        if (
+            session.get("engine") != "codex"
+            or provider == "ark"
+            or limits.get("limitId") != "codex"
+            or not limits.get("planType")
+        ):
+            return unsupported
+        weekly = weekly_codex_window(limits)
+        if weekly is None:
+            return unsupported
+        limits = {"limitId": "codex", "primary": weekly}
     return {
-        "source": "codex",
+        "source": "codex" if bound else "codex_reported",
         "status": "ok",
-        "checked_at": session.get("rate_limits_at", 0),
-        "data": {"rateLimits": camel(limits)},
+        "checked_at": reported_at,
+        "data": {"rateLimits": limits},
     }
 
 
 def quota_text(quota):
     if not quota:
         return "额度未知"
-    source = {"codex": "官方Codex", "ark": "火山套餐"}.get(quota.get("source"), "当前服务")
+    source = {
+        "codex": "官方Codex",
+        "codex_reported": "本会话上报的Codex额度",
+        "ark": "火山套餐",
+    }.get(quota.get("source"), "当前服务")
     age = time.time() - quota.get("checked_at", 0)
     stamp = datetime.fromtimestamp(quota.get("checked_at", time.time())).strftime("%H:%M")
     if quota.get("status") != "ok":
+        if quota.get("status") == "unsupported":
+            return "额度未知"
         if quota.get("status") == "pending":
             return source + "查询中/未知 " + stamp
         return source + "查询失败/未知 " + stamp
     if age > 600:
         return source + "缓存已过期 " + stamp
     data = quota.get("data") or {}
-    if quota.get("source") == "codex":
+    if quota.get("source") in ("codex", "codex_reported"):
         limits = data.get("rateLimits") or data
         windows = []
         for name in ("primary", "secondary"):
             window = limits.get(name)
             if not window or window.get("usedPercent") is None:
                 continue
-            minutes = window.get("windowDurationMins")
+            minutes = window.get("windowDurationMins", window.get("windowMinutes"))
             period = (
                 f"{minutes // 1440}天"
                 if minutes and minutes % 1440 == 0
@@ -122,11 +160,52 @@ def status_footer(data):
         ctx = "压缩后待更新"
     elif not context.get("observed_at") and used is not None:
         ctx += "（时间未知）"
-    elif context.get("observed_at") and time.time() - context["observed_at"] > 600:
-        ctx += "（最近记录）"
     return (
         f"🤖 {data.get('model') or '模型未知'}  ·  🧠 {ctx}  ·  📊 {quota_text(data.get('quota'))}"
     )
+
+
+def metric_reaction_text(data):
+    """Show the model, known effort, and the two percentages for this turn."""
+    context = data.get("context") or {}
+    used, window = context.get("used"), context.get("window")
+    ctx = "?"
+    if not context.get("invalidated") and used is not None and used >= 0 and window and window > 0:
+        ctx = f"{100 * min(1, used / window):.0f}"
+    quota = data.get("quota") or {}
+    left = "?"
+    if (
+        quota.get("source") in ("codex", "codex_reported")
+        and quota.get("status") == "ok"
+        and time.time() - quota.get("checked_at", 0) <= 600
+    ):
+        limits = (quota.get("data") or {}).get("rateLimits") or quota.get("data") or {}
+        weekly = weekly_codex_window(limits)
+        if weekly:
+            left = f"{100 - weekly['usedPercent']:.0f}"
+    model = str(data.get("model") or "").lower()
+    markers = {"astra": "a", "sol": "s", "opus": "o", "sonnet": "n", "haiku": "h"}
+    marker = next((markers[part] for part in model.split("-") if part in markers), None)
+    version = re.search(r"(?<![a-z0-9])(\d{1,2})(?:[.-](\d{1,2}))?(?!\d)", model)
+    effort = {
+        "minimal": "min",
+        "low": "l",
+        "medium": "m",
+        "high": "h",
+        "xhigh": "xh",
+    }.get(data.get("effort"))
+    model_budget = 8 - (len(effort) + 1 if effort else 0)
+    if marker and version:
+        major, minor = version.groups()
+        model = marker + major + ("." + minor if minor else "")
+    else:
+        if model.startswith("gpt-"):
+            model = "g" + model[4:]
+        model = re.sub(r"[^a-z0-9._-]", "", model)
+    label = model[:model_budget] or "?"
+    if effort:
+        label += " " + effort
+    return f"{label} {ctx}/{left}"
 
 
 def codex_quota():
@@ -171,7 +250,7 @@ def codex_quota():
             1,
             "initialize",
             {
-                "clientInfo": {"name": "bridge_quota", "version": "0.3.0"},
+                "clientInfo": {"name": "bridge_quota", "version": "0.3.7"},
                 "capabilities": {"experimentalApi": True},
             },
         )

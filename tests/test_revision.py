@@ -35,6 +35,21 @@ def test_failed_completion_preserves_original_error(error):
     assert meta["status"] == "failed"
 
 
+@pytest.mark.parametrize(
+    "error,category",
+    [
+        ({"message": "connection timeout after 4000 ms"}, "网络或连接故障"),
+        ({"message": "network timeout", "request_id": "req-400-xyz"}, "网络或连接故障"),
+        ({"error": {"httpStatusCode": 400, "message": "invalid parameter"}}, "请求或上下文限制"),
+        ("upstream returned HTTP 401", "认证失败"),
+    ],
+)
+def test_http_status_comes_from_status_evidence_not_ids_or_timing(error, category):
+    from session_bridge.errors import failure_message
+
+    assert category in failure_message(error).splitlines()[0]
+
+
 def test_claude_api_error_is_failure_even_without_end_turn():
     meta = {}
     assert (
@@ -117,13 +132,87 @@ def test_failures_and_interruptions_notify_and_pause_queue(system):
     assert db.get("paused:" + alias)
 
 
-def test_header_uses_native_title_footer_exactly_three_fields(system):
+@pytest.mark.parametrize("native_weekly", [False, True])
+def test_final_result_adds_summary_next_to_receipt_on_matched_user_input_only(
+    system, native_weekly
+):
     svc, db, alias = system
-    svc.enqueue("chat", "结果正文", alias)
+    db.upsert_session(
+        "win",
+        "codex",
+        "same",
+        "",
+        {
+            "model": "gpt-6.2-sol",
+            "model_provider": "custom",
+            "context": {"used": 88000, "window": 100000},
+            "quota": {
+                "source": "codex_reported",
+                "status": "ok",
+                "checked_at": time.time(),
+                "data": {
+                    "rateLimits": {"primary": {"windowDurationMins": 10080, "usedPercent": 5}}
+                },
+            },
+        },
+    )
+    db.reaction("input", "processing", {"chat": "chat", "open_msg_id": "person-id"})
+    db.put("active-receipt:" + alias, {"rid": "input", "turn": "actual-turn", "generation": 1})
+    event = {
+        "engine": "codex",
+        "sid": "same",
+        "result": "结果正文",
+        "kind": "completed",
+        "event_id": "stale-result",
+        "turn": "old-turn",
+    }
+    svc.ingest("win", {"events": [event]})
+    assert db.db.execute("SELECT state FROM reactions").fetchone()[0] == "processing"
+    event.update(
+        event_id="actual-result",
+        turn="actual-turn",
+        effort="xhigh",
+        model_provider="custom" if native_weekly else "volcengine",
+    )
+    if native_weekly:
+        event["native_rate_limits"] = {
+            "limit_id": "codex",
+            "plan_type": "pro",
+            "primary": {"window_minutes": 10080, "used_percent": 15},
+        }
+        event["rate_limits_at"] = time.time()
+    svc.ingest("win", {"events": [event, event]})
     body = db.db.execute("SELECT body FROM outbox").fetchone()[0]
     assert "修复钉钉桥接" in body.splitlines()[0]
-    assert "结果正文" in body
-    assert all(x in body for x in ("🤖", "🧠", "📊"))
+    assert body.splitlines()[-1] == "结果正文"
+    metrics = db.db.execute(
+        "SELECT open_id,state,emotion_id FROM reactions ORDER BY metric,id"
+    ).fetchall()
+    assert [tuple(row) for row in metrics] == [
+        ("person-id", "received", "2659900"),
+        ("person-id", "s6.2 xh 88/" + ("85" if native_weekly else "?"), "54054"),
+    ]
+    assert db.pending_reaction()["metric"] == 0
+    db.reacted("input", "received")
+    assert db.pending_reaction()["emotion_id"] == "54054"
+
+
+def test_completed_desktop_turn_without_user_message_does_not_schedule_reactions(system):
+    svc, db, alias = system
+    db.put("active-receipt:" + alias, {"rid": "without-message-id", "turn": "turn"})
+    svc.react_active(alias, "completed", {"turn": "turn"})
+    assert db.db.execute("SELECT count(*) FROM reactions").fetchone()[0] == 0
+
+
+def test_legacy_input_receipt_cannot_post_metrics_after_context_reset(system):
+    svc, db, alias = system
+    db.reaction("legacy", "processing", {"chat": "chat", "open_msg_id": "person-id"})
+    db.queue_input("legacy", alias, "chat", "original question")
+    db.put("active-receipt:" + alias, {"rid": "legacy", "turn": "legacy-turn"})
+    db.advance_generation(alias)
+    svc.react_active(alias, "completed", {"turn": "legacy-turn"})
+    assert db.db.execute("SELECT state FROM reactions").fetchall()[0][0] == "processing"
+    assert db.db.execute("SELECT count(*) FROM reactions").fetchone()[0] == 1
 
 
 def test_subagent_command_removed(system):

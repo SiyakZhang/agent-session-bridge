@@ -10,6 +10,10 @@ from pathlib import Path
 
 from .task_state import TaskState
 
+MODEL_REACTION_PREFIX = "model:"
+SUMMARY_EMOTION_ID = "54054"
+SUMMARY_EMOTION_BACKGROUND = "im_bg_5"
+
 
 class Store(TaskState):
     """Gateway state. One lock/transaction across each compound state transition."""
@@ -42,10 +46,17 @@ class Store(TaskState):
             CREATE TABLE IF NOT EXISTS reactions(
               id TEXT PRIMARY KEY, chat TEXT, open_id TEXT, robot TEXT,
               state TEXT, sent_state TEXT DEFAULT '', updated REAL DEFAULT 0);
-            CREATE TABLE IF NOT EXISTS card_updates(
-              card_id TEXT PRIMARY KEY, body TEXT, advanced INTEGER DEFAULT 0,
-              status TEXT DEFAULT 'pending');
         """)
+        reaction_columns = {r[1] for r in self.db.execute("PRAGMA table_info(reactions)")}
+        for name, definition in {
+            "emotion_id": "TEXT DEFAULT '2659900'",
+            "metric": "INTEGER DEFAULT 0",
+            "attempts": "INTEGER DEFAULT 0",
+            "retry_at": "REAL DEFAULT 0",
+            "error": "TEXT",
+        }.items():
+            if name not in reaction_columns:
+                self.db.execute(f"ALTER TABLE reactions ADD COLUMN {name} {definition}")
         self.db.commit()
         self.init_tasks()
 
@@ -227,6 +238,28 @@ class Store(TaskState):
                 return dict(row)
         return None
 
+    def question_visible(self, chat, qid):
+        """A bare answer must follow delivery of the entire current numbered prompt."""
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT status,payload,receipt FROM outbox WHERE chat=? AND question_id=? ORDER BY id",
+                (chat, qid),
+            ).fetchall()
+        prompts = [
+            r["status"] for r in rows if (json.loads(r["payload"] or "{}")).get("question_prompt")
+        ]
+        if prompts:
+            return all(status == "sent" for status in prompts)
+        # The original legacy row is the prompt. Later rows can be choice error messages.
+        if not rows or rows[0]["status"] != "sent":
+            return False
+        if not json.loads(rows[0]["payload"] or "{}").get("card"):
+            return False
+        receipt = json.loads(rows[0]["receipt"] or "{}")
+        return bool(receipt.get("processQueryKey")) and not (
+            receipt.get("cardBizId") or receipt.get("outTrackId")
+        )
+
     def sent(self, oid, status):
         with self.transaction():
             self.db.execute("UPDATE outbox SET status=? WHERE id=?", (status, oid))
@@ -266,67 +299,71 @@ class Store(TaskState):
                         state,
                     ),
                 )
-            self.db.execute("UPDATE reactions SET state=? WHERE id=?", (state, rid))
+            self.db.execute(
+                """UPDATE reactions SET attempts=CASE WHEN state!=? THEN 0 ELSE attempts END,
+                retry_at=CASE WHEN state!=? THEN 0 ELSE retry_at END,state=? WHERE id=?""",
+                (state, state, state, rid),
+            )
 
     def pending_reaction(self):
         with self.lock:
             row = self.db.execute(
-                "SELECT * FROM reactions WHERE state!=sent_state AND updated<? ORDER BY updated LIMIT 1",
-                (time.time() - 15,),
+                """SELECT r.* FROM reactions AS r
+                WHERE r.metric IN (0, 4) AND r.state NOT LIKE 'model:%'
+                AND r.state!=r.sent_state AND r.updated<?
+                AND r.retry_at<=? AND r.attempts<3 AND (
+                  r.metric=0 OR NOT EXISTS (
+                    SELECT 1 FROM reactions AS status WHERE status.chat=r.chat
+                    AND status.open_id=r.open_id AND status.metric=0
+                    AND status.state NOT LIKE 'model:%'
+                    AND status.state!=status.sent_state AND status.attempts<3
+                  )
+                ) ORDER BY r.metric, r.updated, r.id LIMIT 1""",
+                (time.time() - 15, time.time()),
             ).fetchone()
             return dict(row) if row else None
+
+    def queue_input_metrics(self, rid, label):
+        """Leave a receipt and append one summary on the same original message."""
+        with self.transaction():
+            self.reaction(rid, "received")
+            self.db.execute(
+                """INSERT OR IGNORE INTO reactions(id,chat,open_id,robot,state,emotion_id,metric)
+                SELECT ?, chat, open_id, robot, ?, ?, 4
+                FROM reactions WHERE id=? AND metric=0 AND open_id!=''""",
+                (f"input-summary:{rid}", label, SUMMARY_EMOTION_ID, rid),
+            )
 
     def reacted(self, rid, state):
         with self.transaction():
             self.db.execute(
-                "UPDATE reactions SET sent_state=?,updated=? WHERE id=?", (state, time.time(), rid)
+                """UPDATE reactions SET sent_state=?,updated=?,attempts=0,error=NULL
+                WHERE id=?""",
+                (state, time.time(), rid),
             )
 
-    def finish_question_card(self, qid, label="此问题已处理或失效"):
+    def shorten_summary(self, row, model):
         with self.transaction():
-            for row in self.db.execute(
-                "SELECT body,receipt FROM outbox WHERE question_id=? AND receipt IS NOT NULL",
-                (qid,),
-            ).fetchall():
-                receipt = json.loads(row["receipt"])
-                card_id = receipt.get("cardBizId") or receipt.get("outTrackId")
-                if card_id:
-                    text = (
-                        row["body"].replace("\n\n---\n", "\n\n" + label + "\n\n---\n")
-                        if "\n\n---\n" in row["body"]
-                        else row["body"] + "\n\n" + label
-                    )
-                    self.db.execute(
-                        "INSERT INTO card_updates(card_id,body,advanced) VALUES(?,?,?) ON CONFLICT(card_id) DO UPDATE SET body=excluded.body,status='pending'",
-                        (card_id, text, int(bool(receipt.get("outTrackId")))),
-                    )
+            self.db.execute(
+                "UPDATE reactions SET state=?,retry_at=0 WHERE id=? AND state=? AND sent_state=''",
+                (model, row["id"], row["state"]),
+            )
 
-    def next_card_update(self):
-        with self.lock:
-            row = self.db.execute(
-                "SELECT * FROM card_updates WHERE status='pending' LIMIT 1"
-            ).fetchone()
-            return dict(row) if row else None
-
-    def card_updated(self, card_id):
+    def reaction_failed(self, row, error):
         with self.transaction():
-            self.db.execute("UPDATE card_updates SET status='done' WHERE card_id=?", (card_id,))
+            self.db.execute(
+                """UPDATE reactions SET attempts=attempts+1,retry_at=?,error=?
+                WHERE id=? AND state=?""",
+                (
+                    time.time() + (2, 10, 60)[min(row["attempts"], 2)],
+                    error,
+                    row["id"],
+                    row["state"],
+                ),
+            )
 
-    def card_callback_actor(self, track_id, staff):
-        with self.lock:
-            rows = self.db.execute(
-                "SELECT * FROM outbox WHERE json_extract(receipt,'$.outTrackId')=? AND status IN ('sent','unknown')",
-                (track_id,),
-            ).fetchall()
-        if len(rows) != 1 or not rows[0]["question_id"]:
-            return None
-        pairs = [
-            p
-            for p in self.pairs()
-            if p["chat"] == rows[0]["chat"] and p["staff"] and p["staff"] == staff
-        ]
-        return (
-            dict(pairs[0], _card_selection=rows[0]["question_id"], _target_alias=rows[0]["alias"])
-            if len(pairs) == 1
-            else None
-        )
+    def reaction_recalled(self, rid, state):
+        with self.transaction():
+            self.db.execute(
+                "UPDATE reactions SET sent_state='' WHERE id=? AND sent_state=?", (rid, state)
+            )

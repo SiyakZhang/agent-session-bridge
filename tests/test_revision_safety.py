@@ -115,6 +115,7 @@ def test_compaction_missing_item_or_interrupted_releases_state(status, kind):
     )
     assert not value.compactions
     assert value.events[-1]["kind"] == kind
+    assert value.events[-1]["turn"] == "t"
     assert "已完成" not in value.events[-1]["result"]
 
 
@@ -135,6 +136,71 @@ def test_async_question_survives_turn_and_desktop_resolution():
     assert value.questions["7"] == frame
     value.process_frame({"method": "serverRequest/resolved", "params": {"requestId": 7}})
     assert not value.questions
+
+
+def test_native_stop_receipt_matches_before_gateway_has_turn_snapshot(system):
+    svc, db, alias = system
+    value = rpc()
+    value.control_requests = {("sid", "stop", "actual-turn"): "stop-rid"}
+    db.reaction("stop-rid", "received", actor(platform_msg_id="stop-input"))
+
+    def action(*args):
+        value.process_frame(
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "sid",
+                    "turn": {"id": "actual-turn", "status": "interrupted"},
+                },
+            }
+        )
+        assert value.events[-1]["control_requests"]["stop"] == "stop-rid"
+        value.events[-1]["ts"] -= 30  # The node's clock is slower than the gateway clock.
+        svc.ingest("win", {"events": value.events})
+        return {"status": "accepted", "detail": "stop accepted"}
+
+    svc.nodes["win"].action = action
+    svc.action("stop-rid", "chat", db.session(alias), "stop", "")
+    assert db.pending_reaction()["state"] == "stopped"
+    assert db.db.execute("SELECT count(*) FROM outbox").fetchone()[0] == 0
+
+
+def test_rpc_abort_waits_for_transcript_reason_and_notifies_only_unresolved(system):
+    svc, db, _alias = system
+    value = rpc()
+    for turn in ("user", "unknown"):
+        value.process_frame(
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "sid",
+                    "turn": {"id": turn, "status": "interrupted"},
+                },
+            }
+        )
+    svc.ingest("win", {"events": value.events})
+    svc.ingest(
+        "win",
+        {
+            "events": [
+                {
+                    "engine": "codex",
+                    "sid": "sid",
+                    "event_id": "transcript",
+                    "kind": "aborted",
+                    "turn": "user",
+                    "user_initiated": True,
+                }
+            ]
+        },
+    )
+    assert db.db.execute("SELECT count(*) FROM outbox").fetchone()[0] == 0
+    with db.transaction():
+        db.db.execute(
+            "UPDATE settings SET value=json_set(value,'$.due',0) WHERE key LIKE 'abort-notice:%' AND json_extract(value,'$.due') IS NOT NULL"
+        )
+    svc.flush_interruption_notices()
+    assert db.db.execute("SELECT count(*) FROM outbox").fetchone()[0] == 1
 
 
 def test_native_failure_retains_401_and_retry_state():
@@ -442,17 +508,6 @@ def test_directory_pagination_and_custom_input_invalidate_old_cards(system):
     assert stage != second
     svc.select("path", actor(), stage, "/work/directory with spaces")
     assert svc.nodes["win"].calls[-1][-1] == "/work/directory with spaces"
-
-
-def test_card_callback_requires_matching_sent_track_and_paired_staff(system):
-    _svc, db, alias = system
-    db.pair("t", "u", "chat", staff="verified-staff")
-    oid = db.enqueue("chat", "question", alias, question_id="q")
-    db.sent(oid, "sent")
-    db.link_sent(oid, {"outTrackId": "known-card"})
-    assert db.card_callback_actor("known-card", "other") is None
-    assert db.card_callback_actor("unknown", "verified-staff") is None
-    assert db.card_callback_actor("known-card", "verified-staff")["_card_selection"] == "q"
 
 
 def test_failed_saved_input_retries_only_explicitly_with_new_attempt(system):
