@@ -105,6 +105,21 @@ class Service:
                         self.enqueue(pair["chat"], text, alias, kind="failed" if offline else None)
                 if data.get("live"):
                     self.store.task(alias, create=True)
+                if (
+                    session["engine"] == "codex"
+                    and not data.get("managed")
+                    and data.get("status") == "busy"
+                    and data.get("prompt_at")
+                ):
+                    self.react_active(
+                        alias,
+                        "processing",
+                        {
+                            "prompt": redact(data.get("prompt", ""), self.secret_values),
+                            "source_ts": data["prompt_at"],
+                            "turn": data.get("turn"),
+                        },
+                    )
                 if data.get("questions") is not None:
                     questions = data.get("questions", [])
                     qids = [
@@ -310,12 +325,8 @@ class Service:
                 session = self.store.resolve_reply(chat, data["reply"])
                 target_alias = session.get("alias")
                 target_question = session.get("_selection")
-                if session.get("_selection") and self.async_followup(
-                    data, session, session["_selection"], text
-                ):
-                    self.task_input(rid, chat, session, text, data)
-                elif session.get("_selection"):
-                    self.select(rid, data, session["_selection"], text)
+                if target_question:
+                    self.select(rid, data, target_question, text, session=session)
                 elif session.get("alias"):
                     self.task_input(rid, chat, session, text, data)
                 else:
@@ -812,13 +823,19 @@ class Service:
             qid,
         )
 
-    def select(self, rid, actor, qid, text):
+    def select(self, rid, actor, qid, text, session=None):
         choice = self.store.get("choice:" + qid, {})
-        if choice.get("alias"):
-            with self.task_lock(choice["alias"]):
-                session = self.store.session(choice["alias"])
-                if self.async_followup(actor, session, qid, text):
-                    session["_quoted"] = True
+        alias = (session or {}).get("alias") or choice.get("alias")
+        if alias:
+            with self.task_lock(alias):
+                if self.store.get("selection-answer:" + rid):
+                    return
+                command = parse_command(text) if session is not None else None
+                if (
+                    session is not None
+                    and (not self.store.get("choice:" + qid) or (command and command[0] in BY_NAME))
+                    and self.async_followup(actor, session, qid, text)
+                ):
                     return self.task_input(rid, actor["chat"], session, text, actor)
                 return self._select(rid, actor, qid, text)
         return self._select(rid, actor, qid, text)
@@ -845,7 +862,7 @@ class Service:
             return True
 
     def async_followup(self, actor, session, qid, text):
-        """Free conversation remains possible after an observed nonblocking question."""
+        """Check whether an observed nonblocking question can be used for follow-up."""
         if not text.strip() or is_numbered_answer(text):
             return False
         choice = self.store.get("async-followup:" + qid, {})
@@ -913,7 +930,10 @@ class Service:
                     return
                 option = (
                     "\n\n".join(
-                        q["question"] + "\n" + "、".join(choice["answers"][q["id"]]["answers"])
+                        "问题："
+                        + q["question"]
+                        + "\n回答："
+                        + "、".join(choice["answers"][q["id"]]["answers"])
                         for q in questions
                     )
                     if followup and choice.get("remote") is False
@@ -1035,6 +1055,7 @@ class Service:
         if not self.store.claim_command(mid, alias, redact(body, self.secret_values)):
             return
         node = self.nodes.get(session["node"])
+        sent_at = time.time()
         response = (
             node.dispatch(mid, session["engine"], session["sid"], prepared)
             if node
@@ -1070,7 +1091,7 @@ class Service:
                     "body_hash": hashlib.sha256(
                         redact(body, self.secret_values).encode()
                     ).hexdigest(),
-                    "sent_at": time.time(),
+                    "sent_at": sent_at,
                 },
             )
         else:
@@ -1203,7 +1224,9 @@ class Service:
             event.get("prompt", "").encode()
         ).hexdigest() != active.get("body_hash"):
             return
-        if state == "completed" and task and generation == task["generation"]:
+        if state == "processing":
+            self.store.reaction(active["rid"], state, previous="queued")
+        elif state == "completed" and task and generation == task["generation"]:
             data = dict(self.store.session(alias)["data"])
             data.update(
                 {

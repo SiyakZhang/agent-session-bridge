@@ -286,7 +286,7 @@ class Store(TaskState):
             self.db.execute("UPDATE outbox SET status='unknown' WHERE status='sending'")
             self.db.execute("UPDATE task_queue SET status='unknown' WHERE status='dispatching'")
 
-    def reaction(self, rid, state, actor=None):
+    def reaction(self, rid, state, actor=None, *, previous=None):
         with self.transaction():
             if actor and (actor.get("open_msg_id") or actor.get("platform_msg_id")):
                 self.db.execute(
@@ -301,8 +301,9 @@ class Store(TaskState):
                 )
             self.db.execute(
                 """UPDATE reactions SET attempts=CASE WHEN state!=? THEN 0 ELSE attempts END,
-                retry_at=CASE WHEN state!=? THEN 0 ELSE retry_at END,state=? WHERE id=?""",
-                (state, state, state, rid),
+                retry_at=CASE WHEN state!=? THEN 0 ELSE retry_at END,state=?
+                WHERE id=? AND (? IS NULL OR state=?)""",
+                (state, state, state, rid, previous, previous),
             )
 
     def pending_reaction(self):

@@ -63,7 +63,7 @@ def parse_record(engine, record, meta):
         ):
             text = text_content(data.get("content"))
             if text and not text.lstrip().startswith("<environment_context>"):
-                meta["prompt"] = redact(text)
+                meta.update(prompt=redact(text), prompt_at=record_time(record))
         elif kind == "turn_context":
             provider = data.get("model_provider")
             if provider is not None and provider != meta.get("model_provider"):
@@ -124,7 +124,7 @@ def parse_record(engine, record, meta):
                 if root_turn and turn and root_turn != turn:
                     return None
             if subtype == "user_message":
-                meta["prompt"] = redact(data.get("message", ""))
+                meta.update(prompt=redact(data.get("message", "")), prompt_at=record_time(record))
             elif subtype == "task_started":
                 meta.pop("compaction_completed", None)
                 meta.pop("user_initiated", None)

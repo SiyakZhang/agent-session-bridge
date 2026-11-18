@@ -4,6 +4,7 @@ import time
 import pytest
 
 from session_bridge.presentation import message_parts
+from session_bridge.scanner import parse_record
 from session_bridge.service import Service
 from session_bridge.state import Store
 from session_bridge.telemetry import metric_reaction_text, quota_text, session_quota, status_footer
@@ -295,13 +296,17 @@ def test_secret_question_only_invites_original_computer_input():
     assert "直接输入答案" not in text and "回复选项数字" not in text
 
 
-def test_async_question_quote_free_text_continues_exact_original_session(system):
+@pytest.mark.parametrize("text", ["请在表格中显示列标题和单位", "/home/user/project"])
+def test_async_question_quote_free_text_continues_exact_original_session(system, text):
     svc, db, _alias = system
-    observe(svc)
-    text = "只有需要我选择才用交互卡片，而且请修好表格"
+    row = observe(svc)
     svc.handle("new-instruction", actor(text, reply={"process_key": "process", "id": "bot-id"}))
-    assert svc.nodes["win"].calls[-1][1:] == ("codex", "sid", text)
-    assert db.get("choice:" + db.get("task-choice:" + _alias))
+    assert svc.nodes["win"].calls[-1][1:] == (
+        "codex",
+        "sid",
+        "问题：文字表情贴在哪里？\n回答：" + text,
+    )
+    assert not db.get("choice:" + row["question_id"])
 
 
 def test_async_numeric_reply_maps_label_and_question_without_native_approval(system):
@@ -387,7 +392,51 @@ def test_free_text_without_quote_when_only_one_async_question(system):
     svc, _db, _alias = system
     observe(svc)
     svc.handle("next", actor("继续修好表格"))
+    assert svc.nodes["win"].calls[-1][-1] == "问题：文字表情贴在哪里？\n回答：继续修好表格"
+
+
+def test_explicitly_addressed_message_does_not_consume_async_question(system):
+    svc, db, _alias = system
+    row = observe(svc)
+    svc.handle("next", actor("桥接程序 继续修好表格"))
     assert svc.nodes["win"].calls[-1][-1] == "继续修好表格"
+    assert db.get("choice:" + row["question_id"])
+
+
+def test_queued_answer_only_shows_processing_after_matching_codex_input(system):
+    svc, db, alias = system
+    observe(svc)
+    node = svc.nodes["win"]
+
+    def dispatch(*args):
+        node.calls.append(args)
+        return {"status": "queued", "detail": "queued"}
+
+    node.dispatch = dispatch
+    svc.handle("answer", actor("2", platform_msg_id="phone", reply={"process_key": "process"}))
+    assert db.pending_reaction()["state"] == "queued"
+    receipt = db.get("active-receipt:" + alias)
+    answer = node.calls[-1][-1]
+    session = {"engine": "codex", "sid": "sid", "status": "busy", "turn": "new"}
+    for text, timestamp, state in (
+        (answer, receipt["sent_at"] - 2, "queued"),
+        ("另一条桌面输入", receipt["sent_at"] + 1, "queued"),
+        (answer, receipt["sent_at"] + 2, "processing"),
+    ):
+        parse_record(
+            "codex",
+            {
+                "type": "response_item",
+                "timestamp": timestamp,
+                "payload": {"type": "message", "role": "user", "content": text},
+            },
+            session,
+        )
+        svc.ingest("win", {"sessions": [session]})
+        assert db.pending_reaction()["state"] == state
+    db.reaction(receipt["rid"], "failed")
+    svc.ingest("win", {"sessions": [session]})
+    assert db.pending_reaction()["state"] == "failed"
 
 
 def test_duplicate_async_callback_is_not_delivered_twice(system):

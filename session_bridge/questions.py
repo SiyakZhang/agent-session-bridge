@@ -64,6 +64,8 @@ def question_text(choice):
             if q.get("isOther") is False
             else "引用这条消息，回复选项数字或直接输入答案。"
         )
+    if choice.get("async") and choice.get("remote") is False and not q.get("isSecret"):
+        lines.append("原会话忙时，答案会排队。")
     return "\n\n".join(lines)
 
 
