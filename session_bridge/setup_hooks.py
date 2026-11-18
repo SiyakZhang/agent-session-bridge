@@ -24,13 +24,36 @@ def install(python, project, state, claude_home=None):
     hook = Path(project) / "session_bridge/hook.py"
     command = f'"{Path(python).as_posix()}" "{hook.as_posix()}" --state "{Path(state).as_posix()}"'
     hooks = settings.setdefault("hooks", {})
-    for event in ("SessionStart", "Stop", "StopFailure", "Notification"):
+    for event in (
+        "SessionStart",
+        "Stop",
+        "StopFailure",
+        "Notification",
+        "PreCompact",
+        "PostCompact",
+        "PreToolUse",
+        "PermissionRequest",
+    ):
         entries = hooks.setdefault(event, [])
-        if any(any(h.get("command") == command for h in e.get("hooks", [])) for e in entries):
-            continue
-        entry = {"hooks": [{"type": "command", "command": command, "timeout": 10}]}
+        # Replace only this exact installed command, preserving unrelated hooks in mixed groups.
+        for existing in entries:
+            existing["hooks"] = [
+                h for h in existing.get("hooks", []) if h.get("command") != command
+            ]
+        entries[:] = [e for e in entries if e.get("hooks")]
+        entry = {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": command,
+                    "timeout": 10,
+                }
+            ]
+        }
         if event == "Notification":
-            entry["matcher"] = "permission_prompt"
+            entry["matcher"] = "elicitation_dialog"
+        if event == "PreToolUse":
+            entry["matcher"] = "AskUserQuestion"
         entries.append(entry)
     private_write(path, json.dumps(settings, ensure_ascii=False, indent=2))
     return str(path), str(backup) if backup else None

@@ -42,9 +42,21 @@ def main():
                 sftp.put(str(file), target + ".new")
                 sftp.chmod(target + ".new", 0o600)
                 sftp.posix_rename(target + ".new", target)
-        for name in ("README.md", "THIRD_PARTY_NOTICES.md"):
+        for name in ("README.md", "THIRD_PARTY_NOTICES.md", "AGENTS.md"):
             if (source / name).exists():
                 sftp.put(str(source / name), base + "/" + name)
+        try:
+            sftp.mkdir(base + "/docs", 0o700)
+        except OSError:
+            sftp.stat(base + "/docs")
+        for folder in sorted(p for p in (source / "docs").rglob("*") if p.is_dir()):
+            remote_folder = base + "/" + folder.relative_to(source).as_posix()
+            try:
+                sftp.mkdir(remote_folder, 0o700)
+            except OSError:
+                sftp.stat(remote_folder)
+        for file in (source / "docs").rglob("*.md"):
+            sftp.put(str(file), base + "/" + file.relative_to(source).as_posix())
         command = (
             "cd "
             + shlex.quote(base)

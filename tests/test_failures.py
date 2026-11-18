@@ -32,7 +32,7 @@ def test_ingest_rollback_and_replay_does_not_lose_notification(tmp_path, monkeyp
     }
     original = service.enqueue
 
-    def fail(*args):
+    def fail(*args, **kwargs):
         raise OSError("simulated crash before outbox commit")
 
     monkeypatch.setattr(service, "enqueue", fail)

@@ -15,6 +15,7 @@ if __package__ in (None, ""):
 
 from session_bridge.config import private_write
 from session_bridge.formatting import redact
+from session_bridge.interactive import collect
 from session_bridge.scanner import parse_record
 
 
@@ -25,13 +26,17 @@ def main():
     data = json.loads(sys.stdin.read(2_000_000))
     sid = str(uuid.UUID(data["session_id"]))
     state = Path(args.state)
+    interactive = collect(state, data)
+    if interactive is not None:
+        print(json.dumps(interactive, ensure_ascii=False))
+        return
     record = {
         k: data.get(k)
         for k in ("hook_event_name", "session_id", "cwd", "transcript_path", "notification_type")
     }
     record.update(id=str(uuid.uuid4()), ts=time.time())
-    for key in ("last_assistant_message", "message"):
-        record[key] = redact(data.get(key, ""))[-16000:]
+    for key in ("last_assistant_message", "message", "error"):
+        record[key] = redact(data.get(key, ""))
     context = {}
     transcript = data.get("transcript_path")
     if transcript and data.get("hook_event_name") != "SessionStart":

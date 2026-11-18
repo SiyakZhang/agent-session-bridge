@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
 
 SECRET_PATTERNS = [
+    (r"(?i)(bearer\s+)[A-Za-z0-9._~+/-]{8,}=*", r"\1[已隐藏]"),
     (
         r"""(?i)(["']?(?:client[_ ]?secret|app[_ ]?secret|password|密码|access[_ ]?token|api[_ ]?key)["']?\s*[:=：]\s*)(["'])(.*?)\2""",
         r'\1"[已隐藏]"',
@@ -56,10 +58,29 @@ def context_message(session, kind, prompt, result, ts=None):
     )
 
 
-def chunks(text, size=4500):
-    # Well below DingTalk's UTF-8 message size limit, even for Chinese text.
-    text = redact(text)
-    parts = [text[i : i + size] for i in range(0, len(text), size)] or ["（空）"]
+def chunks(text, size=12000, code=None):
+    """Conservative UTF-8 budget including headers; no discarded content."""
+    text = redact(text) or "（空）"
+    budget = size - 180 - len((code or "").encode("utf-8"))
+    if budget < 4:
+        raise ValueError("Message byte budget too small")
+    parts = []
+    while text:
+        # msgParam itself is JSON; quotes/backslashes/control chars also consume the API budget.
+        low, high = 1, min(len(text), budget)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if len(json.dumps(text[:middle], ensure_ascii=False).encode("utf-8")) <= budget:
+                low = middle
+            else:
+                high = middle - 1
+        part = text[:low]
+        if len(part) < len(text):
+            boundary = part.rfind("\n")
+            if boundary > len(part) // 2:
+                part = part[: boundary + 1]
+        parts.append(part)
+        text = text[len(part) :]
     if len(parts) == 1:
-        return parts
-    return [f"**消息 {i + 1}/{len(parts)}**\n\n{part}" for i, part in enumerate(parts)]
+        return [(code + "｜" if code else "") + parts[0]]
+    return [f"{code or '消息'} · {i + 1}/{len(parts)}｜{part}" for i, part in enumerate(parts)]

@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dingtalk-session-bridge"
-version = "0.1.0"
+version = "0.3.0"
 description = "Multi-computer DingTalk bridge for existing Codex and Claude sessions"
 requires-python = ">=3.10"
-dependencies = ["dingtalk-stream==0.24.3", "requests>=2.32,<3", "paramiko>=3.5,<5", "psutil>=6,<8"]
+dependencies = ["dingtalk-stream==0.24.3", "requests>=2.32,<3", "paramiko>=3.5,<5", "psutil>=6,<8", "Pillow>=10.4,<13", "websocket-client==1.8.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10", "ruff>=0.11"]

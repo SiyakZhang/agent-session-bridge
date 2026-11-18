@@ -8,6 +8,7 @@ import threading
 import time
 from logging.handlers import RotatingFileHandler
 
+from . import __version__
 from .config import load_config, state_dir
 from .state import Store
 
@@ -32,8 +33,16 @@ class SingleInstance:
 def gateway():
     import dingtalk_stream
 
-    from .bot import DingAPI, Handler, SafeStreamClient, incoming_worker, outgoing_worker
-    from .service import Service
+    from .bot import (
+        CardHandler,
+        DingAPI,
+        Handler,
+        SafeStreamClient,
+        incoming_worker,
+        outgoing_worker,
+        reaction_worker,
+    )
+    from .service import Service, queue_worker
     from .transport import ManagedNode
 
     state = state_dir()
@@ -52,6 +61,17 @@ def gateway():
     store = Store(state / "gateway.sqlite")
     store.recover()
     service = Service(store, config)
+    if config.get("viewer", {}).get("enabled"):
+        from .viewer import HistoryViewer
+
+        options = config["viewer"]
+        service.viewer = HistoryViewer(
+            service,
+            options.get("host", "127.0.0.1"),
+            options.get("port", 8766),
+            options.get("public_url"),
+        )
+        service.viewer.start()
     stop = threading.Event()
     for node_config in config["nodes"]:
         node = ManagedNode(node_config, service.ingest)
@@ -62,6 +82,8 @@ def gateway():
     for target, args in [
         (incoming_worker, (service, stop)),
         (outgoing_worker, (service, api, stop)),
+        (queue_worker, (service, stop)),
+        (reaction_worker, (service, api, stop)),
     ]:
         threading.Thread(target=target, args=args, daemon=True).start()
 
@@ -71,22 +93,32 @@ def gateway():
 
     def heartbeat():
         while not stop.wait(5):
+            connected = getattr(getattr(client, "websocket", None), "state", None) == 1
             store.put(
                 "gateway",
                 {
                     "pid": os.getpid(),
+                    "version": __version__,
                     "time": time.time(),
-                    "stream_connected": getattr(getattr(client, "websocket", None), "state", None)
-                    == 1,
+                    "stream_connected": connected,
                     "nodes": {
-                        name: {"online": n.online, "last_seen": n.last_seen, "error": n.error}
+                        name: {
+                            "online": n.online,
+                            "last_seen": n.last_seen,
+                            "error": n.error,
+                            "version": n.version,
+                        }
                         for name, n in service.nodes.items()
                     },
                 },
             )
+            service.check_stream(connected)
 
     threading.Thread(target=heartbeat, daemon=True).start()
     client.register_callback_handler(dingtalk_stream.ChatbotMessage.TOPIC, Handler(service))
+    client.register_callback_handler(
+        dingtalk_stream.CallbackHandler.TOPIC_CARD_CALLBACK, CardHandler(service)
+    )
     logging.getLogger(__name__).info(
         "Gateway started, pid=%s, nodes=%s", os.getpid(), ",".join(service.nodes)
     )

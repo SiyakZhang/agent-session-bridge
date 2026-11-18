@@ -156,7 +156,7 @@ def deliver(session, text, request_id, scanner):
     if not text.strip() or len(text) > 16000:
         raise ValueError("Message must contain 1–16000 characters")
     marker = hashlib.sha256(request_id.encode()).hexdigest()[:12]
-    prompt = f"[钉钉请求 {marker}]\n{text}"
+    prompt = text
     if engine == "codex":
         if not codex_live(scanner.codex_home, sid):
             raise RuntimeError(

@@ -21,6 +21,7 @@ class ManagedNode:
         self.instance = config["instance"]
         self.on_snapshot = on_snapshot
         self.online = False
+        self.version = ""
         self.error = "尚未连接"
         self.last_seen = 0
         self.writer = None
@@ -129,6 +130,7 @@ class ManagedNode:
                 ):
                     raise ValueError("节点身份与已固定身份不一致，拒绝连接")
                 self.online, self.error = True, ""
+                self.version = str(hello.get("version") or "unknown")[:40]
                 LOG.info("Node online: %s", self.node_id)
                 for line in stream:
                     if self.stop.is_set():
@@ -177,7 +179,10 @@ class ManagedNode:
                 self.handle = None
             self.stop.wait(8)
 
-    def dispatch(self, request_id, engine, sid, text):
+    def action(self, request_id, engine, sid, command, argument):
+        return self.dispatch(request_id, engine, sid, argument, command)
+
+    def dispatch(self, request_id, engine, sid, text, action=None):
         if not self.online or time.time() - self.last_seen > 45:
             return {"status": "failed", "detail": "目标电脑离线或状态过期；没有转发到其他电脑。"}
         item = {"event": threading.Event(), "engine": engine, "sid": sid}
@@ -186,13 +191,14 @@ class ManagedNode:
         try:
             self.write(
                 {
-                    "type": "send",
+                    "type": "action" if action else "send",
                     "node": self.node_id,
                     "instance": self.instance,
                     "request_id": request_id,
                     "engine": engine,
                     "sid": sid,
                     "text": text,
+                    "action": action,
                 }
             )
             if not item["event"].wait(35):
